@@ -132,21 +132,39 @@ typedef char                                    CHAR;
 typedef unsigned char                           UCHAR;
 typedef int                                     INT;
 typedef unsigned int                            UINT;
-#if defined(__x86_64__) && __x86_64__
+/* ThreadX's LONG/ULONG are 32-bit types by design, on 64-bit hosts too
+   (eclipse-threadx/threadx#532). This port narrowed them under __x86_64__ only,
+   so the #else branch silently assumed "not x86_64" meant a 32-bit host where
+   `long` is already 32-bit. That does not hold on any OTHER LP64 target —
+   aarch64, riscv64 — where `unsigned long` is 8 bytes and ULONG quietly became
+   64-bit, breaking every struct layout mirrored against it.
+
+   Test the DATA MODEL rather than the architecture: LP64 needs the narrowing,
+   ILP32 already has 32-bit `long`. __LP64__ covers x86_64, which is kept in the
+   condition only so the original intent stays legible.  */
+#if (defined(__LP64__) && __LP64__) || (defined(__x86_64__) && __x86_64__)
 typedef int                                     LONG;
 typedef unsigned int                            ULONG;
-#else /* __x86_64__ */
+#else /* LP64 */
 typedef long                                    LONG;
 typedef unsigned long                           ULONG;
-#endif /* __x86_64__ */
+#endif /* LP64 */
 typedef short                                   SHORT;
 typedef unsigned short                          USHORT;
 typedef uint64_t                                ULONG64;
 #define ULONG64_DEFINED
 
-/* Override the alignment type to use 64-bit alignment and storage for pointers.  */
+/* Override the alignment type to use 64-bit alignment and storage for pointers.
 
-#if defined(__x86_64__) && __x86_64__
+   Gated on the data model, not on __x86_64__, for the same reason as LONG/ULONG
+   above — and here getting it wrong is worse than a build error. ALIGN_TYPE
+   defaults to ULONG, which is deliberately 32-bit; byte-pool blocks STORE
+   POINTERS in an ALIGN_TYPE, so on a 64-bit host that is not x86_64 the default
+   silently truncated every stored pointer to 4 bytes. That is memory corruption
+   at run time, not a compile failure — nothing on aarch64/riscv64 would have
+   reported it.  */
+
+#if (defined(__LP64__) && __LP64__) || (defined(__x86_64__) && __x86_64__)
 #define ALIGN_TYPE_DEFINED
 typedef unsigned long long                      ALIGN_TYPE;
 
