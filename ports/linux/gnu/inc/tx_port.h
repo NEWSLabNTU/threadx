@@ -481,7 +481,22 @@ void _tx_thread_delete_port_completion(struct TX_THREAD_STRUCT *thread_ptr, UINT
 void _tx_thread_reset_port_completion(struct TX_THREAD_STRUCT *thread_ptr, UINT tx_saved_posture);
 #define TX_THREAD_RESET_PORT_COMPLETION(thread_ptr) _tx_thread_reset_port_completion(thread_ptr, tx_saved_posture);
 
-#if defined(__x86_64__) && __x86_64__
+/* Same data-model test as the LONG/ULONG narrowing above, and it MUST be: this
+   block is what compensates for it. With ULONG narrowed to 32 bits on LP64,
+   `tx_timer_internal_timeout_param` can no longer hold a thread pointer, so
+   these macros route the pointer through `tx_timer_internal_extension_ptr`
+   instead. Keyed on __x86_64__ alone, aarch64 got the narrowing WITHOUT the
+   compensation and fell back to the common
+   `TX_ULONG_TO_THREAD_POINTER_CONVERT(timeout_input)` — a 64-bit pointer
+   truncated to 32 bits, dereferenced by `_tx_thread_timeout`:
+
+     Thread 3 received signal SIGSEGV
+     #0 _tx_thread_timeout ()      x19 = 0xaac85c70   <- upper 32 bits gone
+     #1 _tx_timer_thread_entry ()
+
+   Latent until a thread takes a TIMED suspend, which is why it surfaced on the
+   CycloneDDS images (ddsrt's timed waits) and not the zenoh ones. */
+#if (defined(__LP64__) && __LP64__) || (defined(__x86_64__) && __x86_64__)
 /* Define the ThreadX object deletion extensions for the remaining objects.  */
 
 #define TX_BLOCK_POOL_DELETE_EXTENSION(pool_ptr)
@@ -508,7 +523,7 @@ void _tx_thread_reset_port_completion(struct TX_THREAD_STRUCT *thread_ptr, UINT 
 /* Define the thread timeout pointer setup in _tx_thread_timeout.  */
 
 #define TX_THREAD_TIMEOUT_POINTER_SETUP(t)   (t) =  (TX_THREAD *) _tx_timer_expired_timer_ptr -> tx_timer_internal_extension_ptr;
-#endif /* __x86_64__ */
+#endif /* LP64 */
 
 
 /* Define ThreadX interrupt lockout and restore macros for protection on
