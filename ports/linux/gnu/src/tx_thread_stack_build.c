@@ -29,6 +29,8 @@
 #include "tx_thread.h"
 #include <stdio.h>
 #include <unistd.h>
+#include <limits.h>
+#include <stdint.h>
 
 
 /* Prototype for new thread entry function.  */
@@ -100,8 +102,47 @@ struct sched_param sp;
         }
     }
 
+    /* Run the Linux thread ON the ThreadX thread's own stack, so a host build
+       has the stack its target has: a path that overflows the stated stack on
+       a board overflows it here too.  With NULL attributes the thread ran on
+       the host's default pthread stack (RLIMIT_STACK, usually 8 MiB) and the
+       stack handed to tx_thread_create was never used.
+
+       glibc keeps the thread's descriptor at the top of a supplied stack, and
+       this port writes its fake stack pointer at the top of the ThreadX stack
+       (below), so the host thread gets the stack minus a small top reserve,
+       both ends aligned to 16 bytes.  A stack the host cannot run on (below
+       PTHREAD_STACK_MIN, which differs by architecture) is refused here: the
+       caller states a size the port must raise, never one it silently
+       replaces.  */
+    {
+    pthread_attr_t  attr;
+    uintptr_t       low  = ((uintptr_t) thread_ptr -> tx_thread_stack_start + 15u) & ~(uintptr_t) 15u;
+    uintptr_t       high = ((uintptr_t) thread_ptr -> tx_thread_stack_end - 64u) & ~(uintptr_t) 15u;
+    size_t          size = (high > low) ? (size_t) (high - low) : 0u;
+
+        if (size < (size_t) PTHREAD_STACK_MIN)
+        {
+
+            /* Display an error message.  */
+            printf("ThreadX Linux error: thread stack of %lu bytes is below PTHREAD_STACK_MIN (%lu)!\n",
+                   (unsigned long) thread_ptr -> tx_thread_stack_size, (unsigned long) PTHREAD_STACK_MIN);
+            while(1)
+            {
+            }
+        }
+        if (pthread_attr_init(&attr) || pthread_attr_setstack(&attr, (void *) low, size))
+        {
+
+            /* Display an error message.  */
+            printf("ThreadX Linux error setting the thread's stack!\n");
+            while(1)
+            {
+            }
+        }
+
     /* Create a Linux thread for the application thread.  */
-    if(pthread_create(&thread_ptr -> tx_thread_linux_thread_id, NULL, _tx_linux_thread_entry, thread_ptr))
+    if(pthread_create(&thread_ptr -> tx_thread_linux_thread_id, &attr, _tx_linux_thread_entry, thread_ptr))
     {
 
         /* Display an error message.  */
@@ -109,6 +150,9 @@ struct sched_param sp;
         while(1)
         {
         }
+    }
+
+        pthread_attr_destroy(&attr);
     }
 
     /* Otherwise, we have a good thread create.  */
