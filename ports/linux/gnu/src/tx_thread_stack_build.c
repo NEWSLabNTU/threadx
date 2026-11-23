@@ -111,27 +111,49 @@ struct sched_param sp;
        glibc keeps the thread's descriptor at the top of a supplied stack, and
        this port writes its fake stack pointer at the top of the ThreadX stack
        (below), so the host thread gets the stack minus a small top reserve,
-       both ends aligned to 16 bytes.  A stack the host cannot run on (below
-       PTHREAD_STACK_MIN, which differs by architecture) is refused here: the
-       caller states a size the port must raise, never one it silently
-       replaces.  */
+       both ends aligned to 16 bytes.
+
+       A stack the host cannot run on (below PTHREAD_STACK_MIN, which differs
+       by architecture) is RAISED, not refused: a stated stack size is a
+       floor the port raises to its own minimum, because no portable caller
+       can name a size that is legal on every host (16 KiB on x86_64 glibc,
+       128 KiB on aarch64).  The thread then runs on a host-allocated stack of
+       PTHREAD_STACK_MIN bytes, and a warning names the request.  Refusing
+       here hung every image whose kernel timer thread kept ThreadX's small
+       default stack.  */
     {
     pthread_attr_t  attr;
     uintptr_t       low  = ((uintptr_t) thread_ptr -> tx_thread_stack_start + 15u) & ~(uintptr_t) 15u;
     uintptr_t       high = ((uintptr_t) thread_ptr -> tx_thread_stack_end - 64u) & ~(uintptr_t) 15u;
     size_t          size = (high > low) ? (size_t) (high - low) : 0u;
 
-        if (size < (size_t) PTHREAD_STACK_MIN)
+        if (pthread_attr_init(&attr))
         {
 
             /* Display an error message.  */
-            printf("ThreadX Linux error: thread stack of %lu bytes is below PTHREAD_STACK_MIN (%lu)!\n",
-                   (unsigned long) thread_ptr -> tx_thread_stack_size, (unsigned long) PTHREAD_STACK_MIN);
+            printf("ThreadX Linux error initialising the thread's attributes!\n");
             while(1)
             {
             }
         }
-        if (pthread_attr_init(&attr) || pthread_attr_setstack(&attr, (void *) low, size))
+        if (size < (size_t) PTHREAD_STACK_MIN)
+        {
+
+            /* Raise to the host's floor, on a host-allocated stack.  */
+            printf("ThreadX Linux warning: thread '%s' stack of %lu bytes is below PTHREAD_STACK_MIN (%lu); "
+                   "it runs on a host stack of %lu bytes instead\n",
+                   thread_ptr -> tx_thread_name ? thread_ptr -> tx_thread_name : "?",
+                   (unsigned long) thread_ptr -> tx_thread_stack_size, (unsigned long) PTHREAD_STACK_MIN,
+                   (unsigned long) PTHREAD_STACK_MIN);
+            if (pthread_attr_setstacksize(&attr, (size_t) PTHREAD_STACK_MIN))
+            {
+                printf("ThreadX Linux error setting the thread's stack size!\n");
+                while(1)
+                {
+                }
+            }
+        }
+        else if (pthread_attr_setstack(&attr, (void *) low, size))
         {
 
             /* Display an error message.  */
