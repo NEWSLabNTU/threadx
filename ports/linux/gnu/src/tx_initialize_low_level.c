@@ -31,6 +31,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include <errno.h>
+#include <time.h>
 #include <sys/sysinfo.h>
 
 
@@ -319,52 +320,78 @@ void    _tx_initialize_start_interrupts(void)
 
 void    *_tx_linux_timer_interrupt(void *p)
 {
-struct timespec ts;
-long timer_periodic_nsec;
-int err;
+struct timespec start;
+struct timespec now;
+struct timespec next;
+unsigned long long period_ns;
+unsigned long long boundary_ns;
+unsigned long long elapsed_ns;
+unsigned long long ticks_due;
+unsigned long long ticks_delivered;
 
     (VOID)p;
 
-    /* Calculate periodic timer. */
-    timer_periodic_nsec = 1000000000 / TX_TIMER_TICKS_PER_SECOND;
-    nice(10);
+    /* The tick is a count of periods elapsed on the host's monotonic clock
+       since the timer started, not one tick per wakeup.  Waking at "now plus
+       one period" added each wakeup's latency to every period and never
+       recovered it, so the tick ran slow on a loaded host.  The deadlines are
+       absolute boundaries on CLOCK_MONOTONIC, so latency on one wakeup does
+       not move the next, a wall-clock step cannot move either, and every tick
+       owed since the last wakeup is delivered on this one.  The thread keeps
+       the priority _tx_initialize_low_level gave it: lowering it with nice()
+       only made a loaded host delay it more.  */
+    period_ns = 1000000000ULL / TX_TIMER_TICKS_PER_SECOND;
+    ticks_delivered = 0;
 
     /* Wait startup semaphore. */
     tx_linux_sem_wait(&_tx_linux_timer_semaphore);
 
+    clock_gettime(CLOCK_MONOTONIC, &start);
+
     while(1)
     {
 
-        clock_gettime(CLOCK_REALTIME, &ts);
-        ts.tv_nsec += timer_periodic_nsec;
-        if (ts.tv_nsec > 1000000000)
+        /* Sleep to the next tick boundary.  A signal (the scheduler suspends
+           and resumes this thread with one) ends the sleep early; sleep again
+           to the same absolute deadline.  */
+        boundary_ns = (ticks_delivered + 1) * period_ns;
+        next.tv_sec = start.tv_sec + (time_t)(boundary_ns / 1000000000ULL);
+        next.tv_nsec = start.tv_nsec + (long)(boundary_ns % 1000000000ULL);
+        if (next.tv_nsec >= 1000000000)
         {
-            ts.tv_nsec -= 1000000000;
-            ts.tv_sec++;
+            next.tv_nsec -= 1000000000;
+            next.tv_sec++;
         }
-        do
+        while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL) == EINTR)
         {
-            if (sem_timedwait(&_tx_linux_timer_semaphore, &ts) == 0)
-            {
-                break;
-            }
-            err = errno;
-        } while (err != ETIMEDOUT);
+        }
 
-        /* Call ThreadX context save for interrupt preparation.  */
-        _tx_thread_context_save();
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        elapsed_ns = (unsigned long long)(now.tv_sec - start.tv_sec) * 1000000000ULL
+                   + (unsigned long long)now.tv_nsec - (unsigned long long)start.tv_nsec;
+        ticks_due = elapsed_ns / period_ns;
 
-        /* Call trace ISR enter event insert.  */
-        _tx_trace_isr_enter_insert(0);
+        /* Deliver every tick owed, one timer interrupt each, so each tick's
+           expirations and time-slice accounting run as they would on time.  */
+        while (ticks_delivered < ticks_due)
+        {
+            ticks_delivered++;
 
-        /* Call the ThreadX system timer interrupt processing.  */
-        _tx_timer_interrupt();
+            /* Call ThreadX context save for interrupt preparation.  */
+            _tx_thread_context_save();
 
-        /* Call trace ISR exit event insert.  */
-        _tx_trace_isr_exit_insert(0);
+            /* Call trace ISR enter event insert.  */
+            _tx_trace_isr_enter_insert(0);
 
-        /* Call ThreadX context restore for interrupt completion.  */
-        _tx_thread_context_restore();
+            /* Call the ThreadX system timer interrupt processing.  */
+            _tx_timer_interrupt();
+
+            /* Call trace ISR exit event insert.  */
+            _tx_trace_isr_exit_insert(0);
+
+            /* Call ThreadX context restore for interrupt completion.  */
+            _tx_thread_context_restore();
+        }
 
 #ifdef TX_LINUX_NO_IDLE_ENABLE
         tx_linux_mutex_lock(_tx_linux_mutex);
